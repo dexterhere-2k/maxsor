@@ -669,12 +669,19 @@ def model_decide(ticket: Mapping[str, Any], policy: str | None = None) -> Served
             continue
 
         # The cap and the reported signal follow the answered action, for the same
-        # reason the thin-context guard does.
+        # reason the thin-context guard does. NEEDS_MORE_INFORMATION is scored by
+        # _confidence, exactly like the rule engine: _ACTION_FIELDS has no entry for
+        # it, so routing its signal through the cap would make the signal 1.0 and
+        # every request-for-details answer would report 0.95.
         answer_signal = _signal(normalised, _ACTION_FIELDS.get(answer.action, ()))
-        capped = min(float(answer.confidence), 0.50 + 0.45 * answer_signal)
+        if answer.action == "NEEDS_MORE_INFORMATION":
+            confidence = _confidence(answer.action, signal)
+        else:
+            capped = min(float(answer.confidence), 0.50 + 0.45 * answer_signal)
+            confidence = round(capped, 2)
         return ServedDecision(
             action=answer.action,
-            confidence=round(capped, 2),
+            confidence=confidence,
             reason=answer.reason,
             sources=tuple(answer.sources),
             path="cag",
