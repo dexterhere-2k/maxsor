@@ -1,5 +1,17 @@
 # Support Ticket Decision Assistant
 
+
+## What it does
+
+1. Register / login, get a JWT. All data is isolated per account.
+2. Submit a ticket (the message is the only required field).
+3. The whole policy corpus goes into one Gemini call (CAG) → validated, citation-checked decision.
+4. No API key? A deterministic rule engine answers instead. Every decision records which path answered (`path` in the response and DB).
+5. Tickets + decisions are stored per user. Users can only read their own.
+6. Each answer reports the action, a confidence score, the reason in policy terms, and the policy files it leaned on.
+
+## What's Implemented
+
 Implemented multi-tenant isolation: every account is its own workspace, and all ticket and decision queries are tenant-scoped, so one user can never read another's data. The rest of the design:
 
 - Two decision paths, always attributable. Gemini (via litellm) reads the whole policy corpus in one call (CAG); with no key configured, a deterministic rule engine answers instead. Every decision records which path answered (`path` in the response and the DB).
@@ -13,20 +25,6 @@ Implemented multi-tenant isolation: every account is its own workspace, and all 
 
 Submit a customer support ticket, get back a structured decision: action, confidence, reason, sources.
 
-## What it does
-
-1. Register / login, get a JWT. All data is isolated per account.
-2. Submit a ticket (the message is the only required field).
-3. The whole policy corpus goes into one Gemini call (CAG) → validated, citation-checked decision.
-4. No API key? A deterministic rule engine answers instead. Every decision records which path answered (`path` in the response and DB).
-5. Tickets + decisions are stored per user. Users can only read their own.
-6. Each answer reports the action, a confidence score, the reason in policy terms, and the policy files it leaned on.
-
-## Screenshots
-
-[![Streamlit UI](screenshots/01.png)](screenshots/GALLERY.md)
-
-Click the screenshot to open the full gallery.
 
 ## Architecture
 
@@ -107,3 +105,10 @@ uv run python -m src.compare       # CAG vs retrieval benchmark (needs key)
 uv run python -m src.decision      # per-module self-checks: also src.config, src.cache,
                                    # src.database, src.auth, src.models, src.retrieval
 ```
+
+
+## Screenshots
+
+[![Streamlit UI](screenshots/01.png)](screenshots/GALLERY.md)
+
+Click the screenshot to open the full gallery.
