@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#2f6d5f"
+backgroundColor = "#faf9f7"
+secondaryBackgroundColor = "#f0eee9"
+textColor = "#262420"
+font = "Inter Tight:https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400..700&display=swap"
+headingFont = "Bricolage Grotesque:https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,200..800&display=swap"
+headingFontSizes = ["2.5rem", "1.75rem"]
+headingFontWeights = [800, 700]
+codeFont = "IBM Plex Mono:https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
