@@ -22,6 +22,12 @@ Submit a customer support ticket, get back a structured decision: action, confid
 5. Tickets + decisions are stored per user. Users can only read their own.
 6. Each answer reports the action, a confidence score, the reason in policy terms, and the policy files it leaned on.
 
+## Screenshots
+
+[![Streamlit UI](screenshots/01.png)](screenshots/GALLERY.md)
+
+Click the screenshot to open the full gallery.
+
 ## Architecture
 
 ```mermaid
