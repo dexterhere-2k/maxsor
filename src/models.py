@@ -104,3 +104,21 @@ class TokenOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
+
+if __name__ == "__main__":
+    from pydantic import ValidationError
+
+    Decision(action=next(iter(config.ACTIONS)), confidence=0.5, reason="self check", sources=[])
+    try:
+        Decision(action="NOT_A_REAL_ACTION", confidence=0.5, reason="self check", sources=[])
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("an action outside the vocabulary must be rejected")
+    try:
+        TicketIn(message="   ")
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError("a blank message must be rejected")
+    print(f"{len(config.ACTIONS)} actions accepted, everything else refused")

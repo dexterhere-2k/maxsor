@@ -30,6 +30,9 @@ SAMPLE_CASES = Path(os.getenv("SAMPLE_CASES") or PROJECT_ROOT / "sample_test_cas
 BOUNDARY_PROBE = Path(
     os.getenv("BOUNDARY_PROBE") or PROJECT_ROOT / "data" / "boundary_probe.json"
 )
+EMBEDDINGS_PATH = Path(
+    os.getenv("EMBEDDINGS_PATH") or PROJECT_ROOT / "data" / "embeddings.json"
+)
 
 DATABASE_PATH = os.getenv("DATABASE_PATH") or str(PROJECT_ROOT / "support_assistant.db")
 
@@ -83,3 +86,14 @@ assert len(ACTIONS) == ACTION_VOCAB_SIZE, (
 
 def llm_configured() -> bool:
     return bool(GEMINI_API_KEY)
+
+if __name__ == "__main__":
+    assert len(ACTIONS) == ACTION_VOCAB_SIZE, f"derived {len(ACTIONS)} actions, expected {ACTION_VOCAB_SIZE}"
+    assert KB_DIR.is_dir(), f"no knowledge base at {KB_DIR}"
+    assert TICKETS_CSV.exists(), f"no historical tickets at {TICKETS_CSV}"
+    assert SAMPLE_CASES.exists(), f"no sample cases at {SAMPLE_CASES}"
+    assert TOKEN_TTL_HOURS > 0, "a token must expire"
+    print(
+        f"{len(ACTIONS)} actions, {len(list(KB_DIR.glob('*.md')))} policy documents, "
+        f"model key {'set' if llm_configured() else 'unset'}"
+    )

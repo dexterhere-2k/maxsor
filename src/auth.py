@@ -65,3 +65,11 @@ def current_user(authorization: str | None = Header(default=None)) -> dict[str, 
     if user is None:
         raise _unauthorized("Not authenticated")
     return user
+
+if __name__ == "__main__":
+    digest = hash_password("correct-horse-battery")
+    assert verify_password("correct-horse-battery", digest)
+    assert not verify_password("correct-horse-battery ", digest)
+    assert digest != hash_password("correct-horse-battery"), "each hash needs its own salt"
+    assert decode_token(create_token(7)) == 7, "a token must round-trip to its user id"
+    print("hashing is salted and the token round-trips")

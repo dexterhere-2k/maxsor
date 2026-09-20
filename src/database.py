@@ -218,3 +218,21 @@ def get_ticket(
             _TICKET_SELECT + " WHERE t.id = ? AND t.user_id = ?;", (ticket_id, user_id)
         ).fetchone()
     return _row_to_ticket(row) if row else None
+
+if __name__ == "__main__":
+    import pathlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = str(pathlib.Path(folder) / "self-check.db")
+        init_db(path)
+        with get_conn(path) as conn:
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert {"users", "tickets", "decisions"} <= tables, f"missing tables: {sorted(tables)}"
+        assert journal.lower() == "wal", f"expected WAL, got {journal}"
+        user = create_user("self-check@example.com", "not-a-real-hash", path)
+        assert get_user_by_email("self-check@example.com", path)["id"] == user["id"]
+        assert list_tickets(user["id"], path) == []
+        assert get_ticket(user["id"] + 1, 1, path) is None, "another user must not read the row"
+        print(f"tables {sorted(tables)}, journal {journal}, tenant filter scoped")

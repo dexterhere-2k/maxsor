@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, Mapping
 
@@ -13,6 +14,7 @@ log = logging.getLogger(__name__)
 
 _H1 = re.compile(r"^#\s+(.+?)\s*$")
 _RULE = re.compile(r"^\s*(\d+)\.\s+(.*)$")
+_FRONT_MATTER = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*\n", re.DOTALL)
 
 @dataclass(frozen=True)
 class Rule:
@@ -21,11 +23,18 @@ class Rule:
     text: str
 
 @dataclass(frozen=True)
+class DocMeta:
+    version: int = 0
+    effective_from: datetime.date | None = None
+    supersedes: str | None = None
+
+@dataclass(frozen=True)
 class PolicyDoc:
     doc: str
     title: str
     body: str
     rules: tuple[Rule, ...]
+    meta: DocMeta = DocMeta()
 
 @dataclass(frozen=True)
 class Policy:
@@ -64,8 +73,38 @@ _FACT_SPECS: tuple[_FactSpec, ...] = (
     _FactSpec("shipping", "offer_after_days", 4, r"more than\s+(\d+)\s+days"),
 )
 
+def _parse_meta(text: str) -> tuple[DocMeta, str]:
+    match = _FRONT_MATTER.match(text)
+    if not match:
+        return DocMeta(), text
+
+    fields: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key.strip().lower()] = value.strip()
+
+    version = 0
+    if fields.get("version", "").isdigit():
+        version = int(fields["version"])
+
+    effective: datetime.date | None = None
+    if fields.get("effective_from"):
+        try:
+            effective = datetime.date.fromisoformat(fields["effective_from"])
+        except ValueError:
+            log.warning(
+                "ignoring effective_from=%r: not an ISO date", fields["effective_from"]
+            )
+
+    meta = DocMeta(
+        version=version, effective_from=effective, supersedes=fields.get("supersedes") or None
+    )
+    return meta, text[match.end() :]
+
+
 def _parse_doc(path: Path) -> PolicyDoc:
-    text = path.read_text(encoding="utf-8")
+    meta, text = _parse_meta(path.read_text(encoding="utf-8"))
     stem = path.stem
     title = ""
     rules: list[Rule] = []
@@ -93,7 +132,7 @@ def _parse_doc(path: Path) -> PolicyDoc:
             pending.append(raw.strip())
     flush()
 
-    return PolicyDoc(doc=stem, title=title, body=text, rules=tuple(rules))
+    return PolicyDoc(doc=stem, title=title, body=text, rules=tuple(rules), meta=meta)
 
 def _doc_paths() -> list[Path]:
     if not config.KB_DIR.is_dir():
@@ -104,7 +143,39 @@ def _doc_paths() -> list[Path]:
     return paths
 
 def load_documents() -> dict[str, PolicyDoc]:
-    return {path.stem: _parse_doc(path) for path in _doc_paths()}
+    today = datetime.date.today()
+    live: list[PolicyDoc] = []
+    for doc in (_parse_doc(path) for path in _doc_paths()):
+        if doc.meta.effective_from and doc.meta.effective_from > today:
+            log.info(
+                "ignoring %s.md: not in effect until %s", doc.doc, doc.meta.effective_from
+            )
+            continue
+        live.append(doc)
+
+    newest_by_title: dict[str, PolicyDoc] = {}
+    for doc in live:
+        current = newest_by_title.get(doc.title)
+        if current is None or doc.meta.version > current.meta.version:
+            newest_by_title[doc.title] = doc
+
+    chosen: dict[str, PolicyDoc] = {}
+    for doc in live:
+        winner = newest_by_title.get(doc.title)
+        if winner is not doc:
+            log.info(
+                "%s.md version %s is superseded by %s.md version %s",
+                doc.doc,
+                doc.meta.version,
+                winner.doc,
+                winner.meta.version,
+            )
+            continue
+        logical = doc.meta.supersedes or doc.doc
+        chosen[logical] = replace(
+            doc, doc=logical, rules=tuple(replace(rule, doc=logical) for rule in doc.rules)
+        )
+    return chosen
 
 def build_prefix(docs: Mapping[str, PolicyDoc] | None = None) -> str:
     docs = docs if docs is not None else load_documents()
@@ -187,3 +258,15 @@ def invalidate() -> None:
 def iter_rules() -> Iterator[Rule]:
     for doc in get_policy().docs.values():
         yield from doc.rules
+
+if __name__ == "__main__":
+    policy = get_policy()
+    assert policy.docs, "no policy documents were loaded"
+    assert all(doc.rules for doc in policy.docs.values()), "a document yielded no rules"
+    assert all(value > 0 for doc in policy.facts.values() for value in doc.values()), "a policy fact read as zero or negative"
+    assert policy.fingerprint == fingerprint(), "unchanged policy text must fingerprint the same"
+    assert get_policy() is policy, "the policy bundle must be memoised"
+    print(
+        f"{len(policy.docs)} documents, {sum(len(doc.rules) for doc in policy.docs.values())} rules, "
+        f"fingerprint {policy.fingerprint[:12]}"
+    )
