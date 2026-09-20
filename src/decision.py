@@ -38,8 +38,8 @@ def sanitise_message(message: str) -> str:
             )
     return cleaned
 
-def build_context(ticket: Mapping[str, Any]) -> str:
-    policy = cache.get_prefix()
+def build_context(ticket: Mapping[str, Any], policy: str | None = None) -> str:
+    policy = cache.get_prefix() if policy is None else policy
     safe_message = sanitise_message(str(ticket.get("message") or ""))
     facts = json.dumps(
         {
@@ -66,7 +66,10 @@ def build_context(ticket: Mapping[str, Any]) -> str:
         "=== CUSTOMER TICKET (untrusted input) ===\n"
         f"{safe_message}\n"
         "=== END CUSTOMER TICKET ===\n\n"
-        "Order facts supplied with the ticket (null means not provided):\n"
+        "Order facts supplied with the ticket (null means not provided). A null is an "
+        "instruction to the form-filler, not to you: if the customer states a fact in the "
+        "message text, such as a price or how many days ago something arrived, read it "
+        "there and treat it as supplied:\n"
         f"{facts}\n\n"
         "Decide the ticket strictly from the policies above. If the policies do not "
         "determine an action because a needed fact is missing or unclear, answer "
@@ -161,6 +164,23 @@ _RELEVANT_FIELDS: dict[str, tuple[str, ...]] = {
     "returns": ("product_type", "opened_status", "days_since_delivery"),
 }
 
+_ACTION_FIELDS: dict[str, tuple[str, ...]] = {
+    "CANCEL_AND_REFUND": ("order_status",),
+    "CANNOT_CANCEL_AFTER_DISPATCH": ("order_status",),
+    "WAIT_AND_TRACK": ("order_status", "days_since_dispatch"),
+    "OPEN_SHIPPING_INVESTIGATION": ("order_status", "days_since_dispatch"),
+    "OFFER_REPLACEMENT_OR_REFUND": ("order_status", "days_since_dispatch"),
+    "APPROVE_REFUND_OR_REPLACEMENT": ("days_since_delivery", "order_value_inr"),
+    "REQUEST_PHOTOS": ("days_since_delivery", "order_value_inr"),
+    "REPLACE_CORRECT_ITEM": ("days_since_delivery",),
+    "APPROVE_REPLACEMENT": ("days_since_delivery", "order_value_inr"),
+    "REQUEST_DEFECT_EVIDENCE": ("days_since_delivery", "order_value_inr"),
+    "APPROVE_RETURN": ("product_type", "opened_status", "days_since_delivery"),
+    "REJECT_OPENED_ITEM": ("opened_status",),
+    "REJECT_FOOD_RETURN": ("product_type",),
+    "REJECT_OUTSIDE_WINDOW": ("days_since_delivery", "days_since_dispatch"),
+}
+
 _ALL_FIELDS: tuple[str, ...] = (
     "product_type",
     "opened_status",
@@ -181,6 +201,40 @@ def _as_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
 
+_RUPEE = re.compile(
+    r"(?:rs\.?|₹|inr)\s*([\d,]{2,9})\b"
+    r"|\b([\d,]{2,9})\s*(?:rs\.?|₹|inr|rupees?)\b"
+    r"|\b(?:for|cost|paid|worth)\s+([\d,]{3,9})\b",
+    re.IGNORECASE,
+)
+_AGO = re.compile(r"\b([\w-]+)\s+days?\s+ago\b", re.IGNORECASE)
+_AGO_WORDS = {
+    "a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+}
+_AGO_WORDS.update({str(number): number for number in range(1, 31)})
+
+
+def _extract_facts(message: str) -> dict[str, int]:
+    """Read rupee amounts and 'N days ago' out of the prose, for fields left blank."""
+    extracted: dict[str, int] = {}
+
+    money = _RUPEE.search(message)
+    if money:
+        digits = next((group for group in money.groups() if group), "").replace(",", "")
+        if digits.isdigit():
+            extracted["order_value_inr"] = int(digits)
+
+    ago = _AGO.search(message)
+    if ago:
+        number = _AGO_WORDS.get(ago.group(1).lower())
+        if number is not None:
+            extracted["days_since_delivery"] = number
+
+    return extracted
+
+
 def _normalise(ticket: Mapping[str, Any]) -> dict[str, Any]:
     def category(key: str) -> str:
         value = ticket.get(key)
@@ -193,7 +247,7 @@ def _normalise(ticket: Mapping[str, Any]) -> dict[str, Any]:
         number = _as_number(ticket.get(key))
         return None if number is None else int(number)
 
-    return {
+    values = {
         "message": str(ticket.get("message") or ""),
         "order_value_inr": _as_number(ticket.get("order_value_inr")),
         "days_since_delivery": whole("days_since_delivery"),
@@ -203,12 +257,18 @@ def _normalise(ticket: Mapping[str, Any]) -> dict[str, Any]:
         "order_status": category("order_status"),
     }
 
+    # Facts written in prose are as good as facts typed into the form. Extract only
+    # into fields the submitter left blank, so a typed value is never overridden.
+    for key, value in _extract_facts(values["message"]).items():
+        if values.get(key) in _UNKNOWN_VALUES:
+            values[key] = value
+    return values
+
 def _mentions(ticket: Mapping[str, Any], *patterns: re.Pattern[str]) -> bool:
     text = str(ticket.get("message") or "").lower()
     return any(pattern.search(text) for pattern in patterns)
 
-def _signal(ticket: Mapping[str, Any], doc: str | None) -> float:
-    fields = _RELEVANT_FIELDS.get(doc, _ALL_FIELDS) if doc else _ALL_FIELDS
+def _signal(ticket: Mapping[str, Any], fields: tuple[str, ...]) -> float:
     if not fields:
         return 1.0
     known = sum(1 for field in fields if ticket.get(field) not in _UNKNOWN_VALUES)
@@ -228,8 +288,10 @@ def _route(ticket: Mapping[str, Any], facts: Mapping[str, Mapping[str, int]]) ->
     status = ticket["order_status"]
 
     more_info = (
-        "The ticket does not identify which policy applies, and the order details "
-        "supplied are not enough to determine one."
+        "The offline engine could not tell which policy applies from the message "
+        "wording. State the issue in the usual terms (damaged, late, wrong item, "
+        "return, defective, cancel) and fill in the order details, or configure a "
+        "Gemini key so the model can read the message directly."
     )
 
     if _mentions(ticket, _CANCEL_RE):
@@ -374,7 +436,14 @@ def _route(ticket: Mapping[str, Any], facts: Mapping[str, Mapping[str, int]]) ->
                 f"{defective['window_days']} day window.",
                 "defective_products",
             )
-        if value is not None and value > defective["evidence_threshold_inr"]:
+        if value is None:
+            return _Outcome(
+                "NEEDS_MORE_INFORMATION",
+                "The order value is missing, so the evidence requirement for a defective "
+                "product cannot be determined.",
+                "defective_products",
+            )
+        if value > defective["evidence_threshold_inr"]:
             return _Outcome(
                 "REQUEST_DEFECT_EVIDENCE",
                 f"A defective product valued at Rs {value:,.0f} is above the "
@@ -385,7 +454,9 @@ def _route(ticket: Mapping[str, Any], facts: Mapping[str, Mapping[str, int]]) ->
         return _Outcome(
             "APPROVE_REPLACEMENT",
             f"A functional defect reported {days_delivered} day(s) after delivery, inside the "
-            f"{defective['window_days']} day window, so the product is replaced.",
+            f"{defective['window_days']} day window and valued at Rs {value:,.0f}, at or below "
+            f"the Rs {defective['evidence_threshold_inr']:,} evidence threshold, so the "
+            "product is replaced.",
             "defective_products",
         )
 
@@ -449,7 +520,7 @@ def fallback_decide(ticket: Mapping[str, Any]) -> ServedDecision:
     facts = cache.get_facts()
     normalised = _normalise(ticket)
     outcome = _route(normalised, facts)
-    signal = _signal(normalised, outcome.doc)
+    signal = _signal(normalised, _RELEVANT_FIELDS.get(outcome.doc, ()))
     sources = _sources(outcome.doc, facts)
 
     action, reason = outcome.action, outcome.reason
@@ -527,15 +598,15 @@ def _looks_like_unsupported_schema(error: Exception) -> bool:
     text = str(error).lower()
     return any(hint in text for hint in _UNSUPPORTED_SCHEMA_HINTS)
 
-def model_decide(ticket: Mapping[str, Any]) -> ServedDecision:
+def model_decide(ticket: Mapping[str, Any], policy: str | None = None) -> ServedDecision:
     if not config.llm_configured():
         raise ModelUnavailable("No API key is configured")
 
     normalised = _normalise(ticket)
     routed = _route(normalised, cache.get_facts())
-    signal = _signal(normalised, routed.doc)
+    signal = _signal(normalised, _RELEVANT_FIELDS.get(routed.doc, ()))
 
-    context = build_context(ticket)
+    context = build_context(ticket, policy=policy)
     messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
     prompt_tokens: int | None = None
     last_error: str | None = None
@@ -572,7 +643,13 @@ def model_decide(ticket: Mapping[str, Any]) -> ServedDecision:
             log.warning("Model answer rejected (attempt %d): %s", attempt, exc)
             continue
 
-        if answer.action != "NEEDS_MORE_INFORMATION" and signal < THIN_CONTEXT_THRESHOLD:
+        # Judge thinness by the facts the answered action actually needed, not by the
+        # regex router's guess at the policy. A model reading the prose can act on facts
+        # the router never saw, and its own action declares which fields matter.
+        if (
+            answer.action != "NEEDS_MORE_INFORMATION"
+            and _signal(normalised, _ACTION_FIELDS.get(answer.action, ())) < THIN_CONTEXT_THRESHOLD
+        ):
             answer = answer.model_copy(
                 update={
                     "action": "NEEDS_MORE_INFORMATION",
@@ -591,7 +668,10 @@ def model_decide(ticket: Mapping[str, Any]) -> ServedDecision:
             log.warning("Model answer rejected (attempt %d): %s", attempt, last_error)
             continue
 
-        capped = min(float(answer.confidence), 0.50 + 0.45 * signal)
+        # The cap and the reported signal follow the answered action, for the same
+        # reason the thin-context guard does.
+        answer_signal = _signal(normalised, _ACTION_FIELDS.get(answer.action, ()))
+        capped = min(float(answer.confidence), 0.50 + 0.45 * answer_signal)
         return ServedDecision(
             action=answer.action,
             confidence=round(capped, 2),
@@ -599,7 +679,7 @@ def model_decide(ticket: Mapping[str, Any]) -> ServedDecision:
             sources=tuple(answer.sources),
             path="cag",
             prompt_tokens=prompt_tokens,
-            context_signal=round(signal, 2),
+            context_signal=round(answer_signal, 2),
         )
 
     return ServedDecision(
@@ -622,3 +702,22 @@ def decide(ticket: Mapping[str, Any]) -> ServedDecision:
 
 def validate_sources(sources: Sequence[str], context: str) -> bool:
     return all(source and source in context for source in sources)
+
+if __name__ == "__main__":
+    from pathlib import Path
+
+    threshold = cache.get_facts()["damaged_goods"]["photo_threshold_inr"]
+    damaged = {
+        "message": "My order arrived damaged and the box is crushed.",
+        "order_value_inr": threshold + 1,
+        "days_since_delivery": 1,
+        "product_type": "non_food",
+        "opened_status": "opened",
+        "order_status": "delivered",
+    }
+    assert fallback_decide(damaged).action == "REQUEST_PHOTOS"
+    undated = {key: value for key, value in damaged.items() if key != "days_since_delivery"}
+    assert fallback_decide(undated).action == "NEEDS_MORE_INFORMATION"
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert str(threshold) not in source, "the threshold must be read from the document, not typed here"
+    print(f"follows the documents; {threshold} appears nowhere in this module")

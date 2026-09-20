@@ -8,7 +8,7 @@ import jwt
 import pytest
 from fastapi.testclient import TestClient
 
-from src import auth, cache, config, database, decision, evaluate, llm
+from src import auth, cache, compare, config, database, decision, evaluate, llm, retrieval
 from src.api import app
 
 PASSWORD = "correct-horse-battery"
@@ -253,7 +253,13 @@ def model_client(client, monkeypatch):
         state["calls"].append({"messages": messages, "response_format": response_format})
         return state["respond"](messages)
 
+    def fake_embed(texts):
+        return [
+            [float(len(text) % 11), float(sum(text.encode()) % 13), 1.0] for text in texts
+        ]
+
     monkeypatch.setattr(llm, "complete", fake_complete)
+    monkeypatch.setattr(llm, "embed", fake_embed)
     return client, state
 
 def test_the_model_path_serves_a_validated_answer(model_client):
